@@ -13,42 +13,40 @@ import (
 
 // See: https://github.com/sourcegraph/go-langserver/blob/master/langserver/handler.go#L206
 func (self *Server) newHandler() jsonrpc2.Handler {
-	return newLSPHandler(
-		jsonrpc2.HandlerWithError(self.handle),
-	)
+	handler := jsonrpc2.HandlerWithError(self.handle)
+
+	// Create a handler that uses the server's concurrent methods configuration
+	return newLSPHandler(handler, func(method string) bool {
+		if self.Options != nil {
+			return self.Options.ConcurrentMethods[method]
+		}
+		return false
+	})
 }
 
 // newLSPHandler returns a handler that processes each request goes in its own
 // goroutine, processing requests in a FIFO fashion besides $/cancelRequest, which are not queued.
 // It allows unbounded goroutines, all stalled on the previous one.
-func newLSPHandler(handler jsonrpc2.Handler) jsonrpc2.Handler {
+func newLSPHandler(handler jsonrpc2.Handler, isConcurrentMethod func(string) bool) jsonrpc2.Handler {
 	head := make(chan struct{})
 	close(head)
 	return &lspHandler{
-		wrapped: handler,
-		head:    head,
+		wrapped:            handler,
+		head:               head,
+		isConcurrentMethod: isConcurrentMethod,
 	}
 }
 
 type lspHandler struct {
-	wrapped jsonrpc2.Handler
-	head    chan struct{}
-	mx      sync.Mutex
-}
-
-var IsConcurrentMethod = func(method string) bool {
-	return false
-}
-
-// Allows you to set a predicate that will be called for each handle request
-// If the predicate returns true, the method will be called concurrently
-func SetConcurrentPredicate(predicate func(string) bool) {
-	IsConcurrentMethod = predicate
+	wrapped            jsonrpc2.Handler
+	head               chan struct{}
+	mx                 sync.Mutex
+	isConcurrentMethod func(string) bool
 }
 
 func (a *lspHandler) Handle(ctx contextpkg.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
 	// Don't consider cancel and concurrent requests as part of the request queue
-	if request.Method == "$/cancelRequest" || IsConcurrentMethod(request.Method) {
+	if request.Method == "$/cancelRequest" || a.isConcurrentMethod(request.Method) {
 		go a.wrapped.Handle(ctx, conn, request)
 		return
 	}

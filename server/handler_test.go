@@ -26,7 +26,12 @@ func TestLSPHandler(t *testing.T) {
 		},
 	}
 
-	ah := newLSPHandler(mockHandler)
+	// Use the new function signature that takes a concurrent method check function
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		return false // No concurrent methods in this test
+	})
+
+	// Test sequential execution
 	for i := range 10 {
 		wg.Add(1)
 		ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
@@ -45,6 +50,116 @@ func TestLSPHandler(t *testing.T) {
 	for i := range 10 {
 		if ordered[i] != fmt.Sprintf("call-%d", i) {
 			t.Errorf("Expected call-%d but got %v", i, ordered)
+		}
+	}
+}
+
+func TestConcurrentMethods(t *testing.T) {
+	wg := sync.WaitGroup{}
+	mu := sync.Mutex{}
+	received := []string{}
+	processed := make(chan string, 20)
+
+	// This handler will sleep for different durations based on the method
+	// This allows us to validate that concurrent methods don't block each other
+	mockHandler := &MockHandler{
+		handler: func(ctx context.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
+			if request.Method == "concurrent-0" {
+				// Make the first concurrent method take longer
+				time.Sleep(50 * time.Millisecond)
+			} else {
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			mu.Lock()
+			received = append(received, request.Method)
+			mu.Unlock()
+
+			processed <- request.Method
+			wg.Done()
+		},
+	}
+
+	// Create a handler that marks methods starting with "concurrent" as concurrent
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		isConcurrent := method[:10] == "concurrent"
+		return isConcurrent
+	})
+
+	// First, send a concurrent request (which will take longer)
+	wg.Add(1)
+	ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "concurrent-0",
+	})
+
+	// Then send a mix of concurrent and sequential requests
+	for i := range 5 {
+		wg.Add(1)
+		if i%2 == 0 {
+			// Even numbers are concurrent
+			ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+				Method: fmt.Sprintf("concurrent-%d", i+1),
+			})
+		} else {
+			// Odd numbers are sequential
+			ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+				Method: fmt.Sprintf("sequential-%d", i),
+			})
+		}
+	}
+
+	wg.Wait()
+	close(processed)
+
+	// Collect all processed methods
+	var processedMethods []string
+	for method := range processed {
+		processedMethods = append(processedMethods, method)
+	}
+
+	// Find the position of the slow concurrent method
+	slowMethodIndex := -1
+	for i, method := range processedMethods {
+		if method == "concurrent-0" {
+			slowMethodIndex = i
+			break
+		}
+	}
+
+	// Find positions of other concurrent methods
+	otherConcurrentPositions := []int{}
+	for i, method := range processedMethods {
+		if method[:10] == "concurrent" && method != "concurrent-0" {
+			otherConcurrentPositions = append(otherConcurrentPositions, i)
+		}
+	}
+
+	// Check if other concurrent method is executed before the slow method
+	concurrentFinishedBeforeSlow := false
+	for _, pos := range otherConcurrentPositions {
+		if pos < slowMethodIndex {
+			concurrentFinishedBeforeSlow = true
+			break
+		}
+	}
+
+	// If the slow method is the last one, that's also a valid concurrent behavior
+	if !concurrentFinishedBeforeSlow && slowMethodIndex != len(processedMethods)-1 {
+		t.Errorf("Expected methods to run in parallel but got: %v", processedMethods)
+	}
+
+	// Verify that sequential methods were processed in order
+	sequentialMethods := []string{}
+	for _, method := range received {
+		if method[:10] == "sequential" {
+			sequentialMethods = append(sequentialMethods, method)
+		}
+	}
+
+	for i, method := range sequentialMethods {
+		expected := fmt.Sprintf("sequential-%d", 2*i+1)
+		if method != expected {
+			t.Errorf("Expected sequential method %s, but got %s", expected, method)
 		}
 	}
 }
@@ -133,7 +248,10 @@ func TestLSPHandler_Cancel(t *testing.T) {
 		},
 	}
 
-	ah := newLSPHandler(mockHandler)
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		return false // No concurrent methods in this test
+	})
+
 	ah.Handle(firstCallCtx, &jsonrpc2.Conn{}, &jsonrpc2.Request{
 		Method: "call",
 	})
