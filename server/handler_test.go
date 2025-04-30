@@ -164,6 +164,75 @@ func TestConcurrentMethods(t *testing.T) {
 	}
 }
 
+func TestNewServerWithOptions(t *testing.T) {
+	options := NewServerOptions(func(method string) bool {
+		return method == "concurrent"
+	})
+
+	handleFunc := func(context *glsp.Context) (any, bool, bool, error) {
+		return nil, true, true, nil
+	}
+
+	srv := NewServerWithOptions(handlerFunc(handleFunc), "test server", false, options)
+
+	wg := sync.WaitGroup{}
+	mu := sync.Mutex{}
+	receivedOrder := []string{}
+
+	mockHandler := &MockHandler{
+		handler: func(ctx context.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
+			if request.Method == "concurrent" {
+				// Concurrent method should finish faster despite being called last
+				time.Sleep(10 * time.Millisecond)
+			} else {
+				// Non-concurrent method should be processed in order
+				time.Sleep(30 * time.Millisecond)
+			}
+
+			mu.Lock()
+			receivedOrder = append(receivedOrder, request.Method)
+			mu.Unlock()
+
+			wg.Done()
+		},
+	}
+
+	handler := newLSPHandler(mockHandler, srv.Options.IsConcurrentMethod)
+
+	// Send requests
+	wg.Add(3)
+
+	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "sequential-1",
+	})
+	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "sequential-2",
+	})
+	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "concurrent",
+	})
+
+	wg.Wait()
+
+	if receivedOrder[0] != "concurrent" {
+		t.Errorf("Expected concurrent method to finish the first, but got: %v", receivedOrder)
+	}
+
+	// Sequential methods should be in order
+	sequentialMethods := []string{}
+	for _, method := range receivedOrder {
+		if method != "concurrent" {
+			sequentialMethods = append(sequentialMethods, method)
+		}
+	}
+
+	if sequentialMethods[0] == "sequential-1" && sequentialMethods[1] == "sequential-2" {
+		// This is the expected order
+	} else {
+		t.Errorf("Expected sequential methods to be processed in order, but got: %v", sequentialMethods)
+	}
+}
+
 type streamBuf struct {
 	buf           io.ReadWriter
 	read          int

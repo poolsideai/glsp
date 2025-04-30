@@ -16,12 +16,7 @@ func (self *Server) newHandler() jsonrpc2.Handler {
 	handler := jsonrpc2.HandlerWithError(self.handle)
 
 	// Create a handler that uses the server's concurrent methods configuration
-	return newLSPHandler(handler, func(method string) bool {
-		if self.Options != nil {
-			return self.Options.ConcurrentMethods[method]
-		}
-		return false
-	})
+	return newLSPHandler(handler, self.Options.IsConcurrentMethod)
 }
 
 // newLSPHandler returns a handler that processes each request goes in its own

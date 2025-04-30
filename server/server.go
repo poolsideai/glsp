@@ -11,13 +11,14 @@ var DefaultTimeout = time.Minute
 
 // Server configuration options
 type ServerOptions struct {
-	ConcurrentMethods map[string]bool
+	// Function that determines if a method should be handled concurrently
+	IsConcurrentMethod func(method string) bool
 }
 
-// Additional server options with the specified methods marked as concurrent
-func NewServerOptions(methods map[string]bool) *ServerOptions {
+// Additional server options with the specified predicate function
+func NewServerOptions(isConcurrentMethod func(method string) bool) *ServerOptions {
 	return &ServerOptions{
-		ConcurrentMethods: methods,
+		IsConcurrentMethod: isConcurrentMethod,
 	}
 }
 
@@ -52,7 +53,9 @@ func NewServer(handler glsp.Handler, logName string, debug bool) *Server {
 		StreamTimeout:    DefaultTimeout,
 		WebSocketTimeout: DefaultTimeout,
 		Options: &ServerOptions{
-			ConcurrentMethods: make(map[string]bool),
+			IsConcurrentMethod: func(method string) bool {
+				return false
+			},
 		},
 	}
 }
