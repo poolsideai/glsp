@@ -13,10 +13,7 @@ import (
 
 // See: https://github.com/sourcegraph/go-langserver/blob/master/langserver/handler.go#L206
 func (self *Server) newHandler() jsonrpc2.Handler {
-	handler := jsonrpc2.HandlerWithError(self.handle)
-
-	// Create a handler that uses the server's concurrent methods configuration
-	return newLSPHandler(handler, self.Options.IsConcurrentMethod)
+	return newLSPHandler(jsonrpc2.HandlerWithError(self.handle), self.Options.IsConcurrentMethod)
 }
 
 // newLSPHandler returns a handler that processes each request goes in its own
