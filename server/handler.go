@@ -11,8 +11,6 @@ import (
 	"github.com/tliron/glsp"
 )
 
-const concurrentRequestKey = "poolside.concurrentRequest"
-
 // See: https://github.com/sourcegraph/go-langserver/blob/master/langserver/handler.go#L206
 func (self *Server) newHandler() jsonrpc2.Handler {
 	return newLSPHandler(
@@ -38,14 +36,19 @@ type lspHandler struct {
 	mx      sync.Mutex
 }
 
-func (a *lspHandler) Handle(ctx contextpkg.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
-	// for cancel requests, allow preemption, and don't consider it part of the request queue
-	if request.Method == "$/cancelRequest" {
-		go a.wrapped.Handle(ctx, conn, request)
-		return
-	}
+var IsConcurrentMethod = func(method string) bool {
+	return false
+}
 
-	if v, _ := ctx.Value(concurrentRequestKey).(bool); v {
+// Allows you to set a predicate that will be called for each handle request
+// If the predicate returns true, the method will be called concurrently
+func SetConcurrentPredicate(predicate func(string) bool) {
+	IsConcurrentMethod = predicate
+}
+
+func (a *lspHandler) Handle(ctx contextpkg.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
+	// Don't consider cancel and concurrent requests as part of the request queue
+	if request.Method == "$/cancelRequest" || IsConcurrentMethod(request.Method) {
 		go a.wrapped.Handle(ctx, conn, request)
 		return
 	}
