@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,7 +27,12 @@ func TestLSPHandler(t *testing.T) {
 		},
 	}
 
-	ah := newLSPHandler(mockHandler)
+	// Use the new function signature that takes a concurrent method check function
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		return false // No concurrent methods in this test
+	})
+
+	// Test sequential execution
 	for i := range 10 {
 		wg.Add(1)
 		ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
@@ -46,6 +52,86 @@ func TestLSPHandler(t *testing.T) {
 		if ordered[i] != fmt.Sprintf("call-%d", i) {
 			t.Errorf("Expected call-%d but got %v", i, ordered)
 		}
+	}
+}
+
+func TestConcurrentMethods(t *testing.T) {
+	wg := sync.WaitGroup{}
+
+	method1Started := make(chan struct{})
+	method1Blocked := make(chan struct{})
+	method1CanFinish := make(chan struct{})
+	method2Started := make(chan struct{})
+
+	mockHandler := &MockHandler{
+		handler: func(ctx context.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
+			defer wg.Done()
+
+			if request.Method == "concurrent-1" {
+				// Signal start, then block until allowed to finish
+				close(method1Started)
+				close(method1Blocked)
+				<-method1CanFinish
+			} else if request.Method == "concurrent-2" {
+				// Wait for first method to start and block
+				<-method1Blocked
+				close(method2Started)
+			}
+		},
+	}
+
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		return strings.HasPrefix(method, "concurrent")
+	})
+
+	wg.Add(2)
+
+	ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "concurrent-1",
+	})
+	ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "concurrent-2",
+	})
+
+	select {
+	case <-method2Started:
+		// Test is passed
+	case <-time.After(100 * time.Millisecond): // Safety timeout
+		t.Fatal("Test timed out waiting for concurrent execution")
+	}
+
+	close(method1CanFinish)
+
+	wg.Wait()
+}
+
+func TestNewServerWithOptions(t *testing.T) {
+	testMethodName := "test-method"
+
+	options := NewServerOptions(func(method string) bool {
+		return method == testMethodName
+	})
+
+	handleFunc := func(context *glsp.Context) (any, bool, bool, error) {
+		return nil, true, true, nil
+	}
+
+	srv := NewServerWithOptions(handlerFunc(handleFunc), "test server", false, options)
+
+	handler := srv.newHandler()
+
+	lspHandler, ok := handler.(*lspHandler)
+	if !ok {
+		t.Fatal("Expected handler to be of type *lspHandler")
+	}
+
+	// Checking that handler's isConcurrentMethod function is correctly set
+	if !lspHandler.isConcurrentMethod(testMethodName) {
+		t.Error("Expected isConcurrentMethod to return true for test-method")
+	}
+
+	if lspHandler.isConcurrentMethod("different-method") {
+		t.Error("Expected isConcurrentMethod to return false for different-method")
 	}
 }
 
@@ -133,7 +219,10 @@ func TestLSPHandler_Cancel(t *testing.T) {
 		},
 	}
 
-	ah := newLSPHandler(mockHandler)
+	ah := newLSPHandler(mockHandler, func(method string) bool {
+		return false // No concurrent methods in this test
+	})
+
 	ah.Handle(firstCallCtx, &jsonrpc2.Conn{}, &jsonrpc2.Request{
 		Method: "call",
 	})

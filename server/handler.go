@@ -13,32 +13,32 @@ import (
 
 // See: https://github.com/sourcegraph/go-langserver/blob/master/langserver/handler.go#L206
 func (self *Server) newHandler() jsonrpc2.Handler {
-	return newLSPHandler(
-		jsonrpc2.HandlerWithError(self.handle),
-	)
+	return newLSPHandler(jsonrpc2.HandlerWithError(self.handle), self.Options.IsConcurrentMethod)
 }
 
 // newLSPHandler returns a handler that processes each request goes in its own
 // goroutine, processing requests in a FIFO fashion besides $/cancelRequest, which are not queued.
 // It allows unbounded goroutines, all stalled on the previous one.
-func newLSPHandler(handler jsonrpc2.Handler) jsonrpc2.Handler {
+func newLSPHandler(handler jsonrpc2.Handler, isConcurrentMethod func(string) bool) jsonrpc2.Handler {
 	head := make(chan struct{})
 	close(head)
 	return &lspHandler{
-		wrapped: handler,
-		head:    head,
+		wrapped:            handler,
+		head:               head,
+		isConcurrentMethod: isConcurrentMethod,
 	}
 }
 
 type lspHandler struct {
-	wrapped jsonrpc2.Handler
-	head    chan struct{}
-	mx      sync.Mutex
+	wrapped            jsonrpc2.Handler
+	head               chan struct{}
+	mx                 sync.Mutex
+	isConcurrentMethod func(string) bool
 }
 
 func (a *lspHandler) Handle(ctx contextpkg.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
-	// for cancel requests, allow preemption, and don't consider it part of the request queue
-	if request.Method == "$/cancelRequest" {
+	// Don't consider cancel and concurrent requests as part of the request queue
+	if request.Method == "$/cancelRequest" || a.isConcurrentMethod(request.Method) {
 		go a.wrapped.Handle(ctx, conn, request)
 		return
 	}
