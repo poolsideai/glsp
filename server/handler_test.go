@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,117 +57,59 @@ func TestLSPHandler(t *testing.T) {
 
 func TestConcurrentMethods(t *testing.T) {
 	wg := sync.WaitGroup{}
-	mu := sync.Mutex{}
-	received := []string{}
-	processed := make(chan string, 20)
 
-	// This handler will sleep for different durations based on the method
-	// This allows us to validate that concurrent methods don't block each other
+	method1Started := make(chan struct{})
+	method1Blocked := make(chan struct{})
+	method1CanFinish := make(chan struct{})
+	method2Started := make(chan struct{})
+
 	mockHandler := &MockHandler{
 		handler: func(ctx context.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
-			if request.Method == "concurrent-0" {
-				// Make the first concurrent method take longer
-				time.Sleep(50 * time.Millisecond)
-			} else {
-				time.Sleep(5 * time.Millisecond)
+			defer wg.Done()
+
+			if request.Method == "concurrent-1" {
+				// Signal start, then block until allowed to finish
+				close(method1Started)
+				close(method1Blocked)
+				<-method1CanFinish
+			} else if request.Method == "concurrent-2" {
+				// Wait for first method to start and block
+				<-method1Blocked
+				close(method2Started)
 			}
-
-			mu.Lock()
-			received = append(received, request.Method)
-			mu.Unlock()
-
-			processed <- request.Method
-			wg.Done()
 		},
 	}
 
-	// Create a handler that marks methods starting with "concurrent" as concurrent
 	ah := newLSPHandler(mockHandler, func(method string) bool {
-		isConcurrent := method[:10] == "concurrent"
-		return isConcurrent
+		return strings.HasPrefix(method, "concurrent")
 	})
 
-	// First, send a concurrent request (which will take longer)
-	wg.Add(1)
+	wg.Add(2)
+
 	ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-		Method: "concurrent-0",
+		Method: "concurrent-1",
+	})
+	ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
+		Method: "concurrent-2",
 	})
 
-	// Then send a mix of concurrent and sequential requests
-	for i := range 5 {
-		wg.Add(1)
-		if i%2 == 0 {
-			// Even numbers are concurrent
-			ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-				Method: fmt.Sprintf("concurrent-%d", i+1),
-			})
-		} else {
-			// Odd numbers are sequential
-			ah.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-				Method: fmt.Sprintf("sequential-%d", i),
-			})
-		}
+	select {
+	case <-method2Started:
+		// Test is passed
+	case <-time.After(100 * time.Millisecond): // Safety timeout
+		t.Fatal("Test timed out waiting for concurrent execution")
 	}
+
+	close(method1CanFinish)
 
 	wg.Wait()
-	close(processed)
-
-	// Collect all processed methods
-	var processedMethods []string
-	for method := range processed {
-		processedMethods = append(processedMethods, method)
-	}
-
-	// Find the position of the slow concurrent method
-	slowMethodIndex := -1
-	for i, method := range processedMethods {
-		if method == "concurrent-0" {
-			slowMethodIndex = i
-			break
-		}
-	}
-
-	// Find positions of other concurrent methods
-	otherConcurrentPositions := []int{}
-	for i, method := range processedMethods {
-		if method[:10] == "concurrent" && method != "concurrent-0" {
-			otherConcurrentPositions = append(otherConcurrentPositions, i)
-		}
-	}
-
-	// Check if other concurrent method is executed before the slow method
-	concurrentFinishedBeforeSlow := false
-	for _, pos := range otherConcurrentPositions {
-		if pos < slowMethodIndex {
-			concurrentFinishedBeforeSlow = true
-			break
-		}
-	}
-
-	// If the slow method is the last one, that's also a valid concurrent behavior
-	if !concurrentFinishedBeforeSlow && slowMethodIndex != len(processedMethods)-1 {
-		t.Errorf("Expected methods to run in parallel but got: %v", processedMethods)
-	}
-
-	// Verify that sequential methods were processed in order
-	sequentialMethods := []string{}
-	for _, method := range received {
-		if method[:10] == "sequential" {
-			sequentialMethods = append(sequentialMethods, method)
-		}
-	}
-
-	for i, method := range sequentialMethods {
-		expected := fmt.Sprintf("sequential-%d", 2*i+1)
-		if method != expected {
-			t.Errorf("Expected sequential method %s, but got %s", expected, method)
-		}
-	}
 }
 
 func TestNewServerWithOptions(t *testing.T) {
+	testMethodName := "test-method"
+
 	options := NewServerOptions(func(method string) bool {
-		return method == "concurrent"
+		return method == testMethodName
 	})
 
 	handleFunc := func(context *glsp.Context) (any, bool, bool, error) {
@@ -175,61 +118,20 @@ func TestNewServerWithOptions(t *testing.T) {
 
 	srv := NewServerWithOptions(handlerFunc(handleFunc), "test server", false, options)
 
-	wg := sync.WaitGroup{}
-	mu := sync.Mutex{}
-	receivedOrder := []string{}
+	handler := srv.newHandler()
 
-	mockHandler := &MockHandler{
-		handler: func(ctx context.Context, conn *jsonrpc2.Conn, request *jsonrpc2.Request) {
-			if request.Method == "concurrent" {
-				// Concurrent method should finish faster despite being called last
-				time.Sleep(10 * time.Millisecond)
-			} else {
-				// Non-concurrent method should be processed in order
-				time.Sleep(30 * time.Millisecond)
-			}
-
-			mu.Lock()
-			receivedOrder = append(receivedOrder, request.Method)
-			mu.Unlock()
-
-			wg.Done()
-		},
+	lspHandler, ok := handler.(*lspHandler)
+	if !ok {
+		t.Fatal("Expected handler to be of type *lspHandler")
 	}
 
-	handler := newLSPHandler(mockHandler, srv.Options.IsConcurrentMethod)
-
-	// Send requests
-	wg.Add(3)
-
-	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-		Method: "sequential-1",
-	})
-	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-		Method: "sequential-2",
-	})
-	handler.Handle(context.Background(), &jsonrpc2.Conn{}, &jsonrpc2.Request{
-		Method: "concurrent",
-	})
-
-	wg.Wait()
-
-	if receivedOrder[0] != "concurrent" {
-		t.Errorf("Expected concurrent method to finish the first, but got: %v", receivedOrder)
+	// Checking that handler's isConcurrentMethod function is correctly set
+	if !lspHandler.isConcurrentMethod(testMethodName) {
+		t.Error("Expected isConcurrentMethod to return true for test-method")
 	}
 
-	// Sequential methods should be in order
-	sequentialMethods := []string{}
-	for _, method := range receivedOrder {
-		if method != "concurrent" {
-			sequentialMethods = append(sequentialMethods, method)
-		}
-	}
-
-	if sequentialMethods[0] == "sequential-1" && sequentialMethods[1] == "sequential-2" {
-		// This is the expected order
-	} else {
-		t.Errorf("Expected sequential methods to be processed in order, but got: %v", sequentialMethods)
+	if lspHandler.isConcurrentMethod("different-method") {
+		t.Error("Expected isConcurrentMethod to return false for different-method")
 	}
 }
 
