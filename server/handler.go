@@ -60,15 +60,11 @@ func (self *Server) handle(context contextpkg.Context, connection *jsonrpc2.Conn
 	glspContext := glsp.Context{
 		Method:    request.Method,
 		RequestID: request.ID,
-		Notify: func(method string, params any) {
-			if err := connection.Notify(context, method, params); err != nil {
-				self.Log.Error(err.Error())
-			}
+		Notify: func(method string, params any) error {
+			return connection.Notify(context, method, params)
 		},
-		Call: func(method string, params any, result any) {
-			if err := connection.Call(context, method, params, result); err != nil {
-				self.Log.Error(err.Error())
-			}
+		Call: func(method string, params any, result any) error {
+			return connection.Call(context, method, params, result)
 		},
 		Context: context,
 	}
