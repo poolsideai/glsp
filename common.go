@@ -7,8 +7,8 @@ import (
 	"github.com/sourcegraph/jsonrpc2"
 )
 
-type NotifyFunc func(method string, params any) error
-type CallFunc func(method string, params any, result any) error
+type NotifyFunc func(ctx contextpkg.Context, method string, params any) error
+type CallFunc func(ctx contextpkg.Context, method string, params any, result any) error
 
 type Context struct {
 	Method string
