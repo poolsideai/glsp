@@ -56,18 +56,17 @@ func (a *lspHandler) Handle(ctx contextpkg.Context, conn *jsonrpc2.Conn, request
 	}()
 }
 
-func (self *Server) handle(context contextpkg.Context, connection *jsonrpc2.Conn, request *jsonrpc2.Request) (any, error) {
+func (self *Server) handle(ctx contextpkg.Context, connection *jsonrpc2.Conn, request *jsonrpc2.Request) (any, error) {
 	glspContext := glsp.Context{
 		Method:    request.Method,
 		RequestID: request.ID,
-		Context:   context,
-	}
-
-	glspContext.Notify = func(method string, params any) error {
-		return connection.Notify(glspContext.Context, method, params)
-	}
-	glspContext.Call = func(method string, params any, result any) error {
-		return connection.Call(glspContext.Context, method, params, result)
+		Context:   ctx,
+		Notify: func(ctx contextpkg.Context, method string, params any) error {
+			return connection.Notify(ctx, method, params)
+		},
+		Call: func(ctx contextpkg.Context, method string, params any, result any) error {
+			return connection.Call(ctx, method, params, result)
+		},
 	}
 
 	if request.Params != nil {

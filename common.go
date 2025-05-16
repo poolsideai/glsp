@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 
 	"github.com/sourcegraph/jsonrpc2"
+	"golang.org/x/net/context"
 )
 
-type NotifyFunc func(method string, params any) error
-type CallFunc func(method string, params any, result any) error
+type NotifyFunc func(ctx context.Context, method string, params any) error
+type CallFunc func(ctx context.Context, method string, params any, result any) error
 
 type Context struct {
 	Method string
